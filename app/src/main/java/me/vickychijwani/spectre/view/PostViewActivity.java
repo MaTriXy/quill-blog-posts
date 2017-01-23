@@ -14,7 +14,9 @@ import android.support.v4.widget.DrawerLayout;
 import android.support.v7.app.AlertDialog;
 import android.support.v7.widget.PopupMenu;
 import android.support.v7.widget.Toolbar;
+import android.text.Editable;
 import android.text.TextUtils;
+import android.text.TextWatcher;
 import android.util.Log;
 import android.util.TypedValue;
 import android.view.Menu;
@@ -23,6 +25,7 @@ import android.view.View;
 import android.view.ViewGroup;
 import android.view.inputmethod.EditorInfo;
 import android.widget.ArrayAdapter;
+import android.widget.CheckBox;
 import android.widget.ImageView;
 import android.widget.ProgressBar;
 import android.widget.TextView;
@@ -65,10 +68,10 @@ public class PostViewActivity extends BaseActivity implements
         ViewPager.OnPageChangeListener,
         PostViewFragmentPagerAdapter.OnFragmentsInitializedListener,
         View.OnClickListener,
-        PostEditFragment.PostTagsManager
+        PostEditFragment.PostSettingsManager
 {
 
-    private static final String TAG = "PostViewActivity";
+    private static final String TAG = PostViewActivity.class.getSimpleName();
     public static final int RESULT_CODE_DELETED = 1;
 
     @Bind(R.id.toolbar)                         Toolbar mToolbar;
@@ -81,6 +84,7 @@ public class PostViewActivity extends BaseActivity implements
     private FormattingToolbarManager mFormattingToolbarManager = null;
     private PostImageLayoutManager mPostImageLayoutManager = null;
     private ChipsEditText mPostTagsEditText;
+    private CheckBox mPostFeatureCheckBox;
 
     private Post mPost;
     private PostViewFragment mPostViewFragment;
@@ -92,6 +96,7 @@ public class PostViewActivity extends BaseActivity implements
     private Runnable mSaveTimeoutRunnable;
     private String mBlogUrl;
     private boolean mbFileStorageEnabled = false;
+    private PostSettingsChangedListener mPostSettingsChangedListener;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -108,6 +113,7 @@ public class PostViewActivity extends BaseActivity implements
         ViewGroup postImageLayout = (ViewGroup) headerView.findViewById(R.id.post_image_edit_layout);
         mPostImageLayoutManager = new PostImageLayoutManager(postImageLayout);
         mPostTagsEditText = (ChipsEditText) headerView.findViewById(R.id.post_tags_edit);
+        mPostFeatureCheckBox = (CheckBox) headerView.findViewById(R.id.post_feature);
 
         setSupportActionBar(mToolbar);
         //noinspection ConstantConditions
@@ -121,7 +127,7 @@ public class PostViewActivity extends BaseActivity implements
         ArrayAdapter<String> tagSuggestionsAdapter = new ArrayAdapter<>(this,
                 android.R.layout.simple_dropdown_item_1line, Collections.emptyList());
         mPostTagsEditText.setAdapter(tagSuggestionsAdapter);
-        mPostTagsEditText.setTokenizer(new ChipsEditText.SpaceTokenizer());
+        mPostTagsEditText.setTokenizer(new ChipsEditText.CommaTokenizer());
         mPostTagsEditText.setChipBackgroundColor(colorPrimary);
         mPostTagsEditText.setChipTextColor(ContextCompat.getColor(this, R.color.text_primary_inverted));
 
@@ -132,6 +138,26 @@ public class PostViewActivity extends BaseActivity implements
         mPostTagsEditText.setMaxLines(4);
         mPostTagsEditText.setHorizontallyScrolling(false);
         mPostTagsEditText.setImeOptions(EditorInfo.IME_ACTION_DONE);
+
+        mPostTagsEditText.addTextChangedListener(new TextWatcher() {
+            @Override
+            public void beforeTextChanged(CharSequence s, int start, int count, int after) {}
+
+            @Override
+            public void onTextChanged(CharSequence s, int start, int before, int count) {}
+
+            @Override
+            public void afterTextChanged(Editable e) {
+                if (mPostSettingsChangedListener != null) {
+                    mPostSettingsChangedListener.onPostSettingsChanged();
+                }
+            }
+        });
+        mPostFeatureCheckBox.setOnCheckedChangeListener((btn, checked) -> {
+            if (mPostSettingsChangedListener != null) {
+                mPostSettingsChangedListener.onPostSettingsChanged();
+            }
+        });
 
         mSaveTimeoutRunnable = () -> {
             if (mbPreviewPost) {
@@ -147,6 +173,10 @@ public class PostViewActivity extends BaseActivity implements
         } else {
             bundle = getIntent().getExtras();
         }
+        mPost = bundle.getParcelable(BundleKeys.POST);
+        //noinspection ConstantConditions
+        Crashlytics.log(Log.DEBUG, TAG, "[onCreate] post id = " + mPost.getId());
+
         @PostViewFragmentPagerAdapter.TabPosition int startingTabPosition =
                 PostViewFragmentPagerAdapter.TAB_POSITION_PREVIEW;
         if (bundle.getBoolean(BundleKeys.START_EDITING)) {
@@ -155,7 +185,6 @@ public class PostViewActivity extends BaseActivity implements
             // hide the formatting toolbar in the preview
             mFormattingToolbarManager.hide();
         }
-        mPost = bundle.getParcelable(BundleKeys.POST);
         mbFileStorageEnabled = bundle.getBoolean(BundleKeys.FILE_STORAGE_ENABLED);
         mViewPager.setAdapter(new PostViewFragmentPagerAdapter(this, getSupportFragmentManager(),
                 mPost, mbFileStorageEnabled, this));
@@ -218,9 +247,12 @@ public class PostViewActivity extends BaseActivity implements
     @Override
     public boolean onPrepareOptionsMenu(Menu menu) {
         MenuItem publishItem = menu.findItem(R.id.action_publish);
+        MenuItem unpublishItem = menu.findItem(R.id.action_unpublish);
         publishItem.setTitle(mPost.isDraft() ? R.string.publish : R.string.update_post);
-        publishItem.setVisible(mPostEditFragment.shouldShowPublishAction());
-        menu.findItem(R.id.action_unpublish).setVisible(mPostEditFragment.shouldShowUnpublishAction());
+        if (mPostEditFragment != null) {
+            publishItem.setVisible(mPostEditFragment.shouldShowPublishAction());
+            unpublishItem.setVisible(mPostEditFragment.shouldShowUnpublishAction());
+        }
         // only drafts can be deleted (scheduled or published posts cannot be deleted at all,
         // to avoid all risk of accidental deletion)
         boolean shouldShowDeleteAction = mPost.isDraft();
@@ -401,6 +433,7 @@ public class PostViewActivity extends BaseActivity implements
             tagStrs.add(tag.getName());
         }
         mPostTagsEditText.setTokens(tagStrs);
+        mPostFeatureCheckBox.setChecked(mPost.isFeatured());
     }
 
     @Override
@@ -437,6 +470,16 @@ public class PostViewActivity extends BaseActivity implements
     }
 
     @Override
+    public void setOnPostSettingsChangedListener(@NonNull PostSettingsChangedListener listener) {
+        mPostSettingsChangedListener = listener;
+    }
+
+    @Override
+    public void removeOnPostSettingsChangedListener() {
+        mPostSettingsChangedListener = null;
+    }
+
+    @Override
     public RealmList<Tag> getTags() {
         RealmList<Tag> tags = new RealmList<>();
         List<String> tagStrs = mPostTagsEditText.getTokens();
@@ -444,6 +487,11 @@ public class PostViewActivity extends BaseActivity implements
             tags.add(new Tag(tagStr));
         }
         return tags;
+    }
+
+    @Override
+    public boolean isFeatured() {
+        return mPostFeatureCheckBox.isChecked();
     }
 
     @Override
@@ -603,6 +651,11 @@ public class PostViewActivity extends BaseActivity implements
             }
         }
 
+    }
+
+
+    public interface PostSettingsChangedListener {
+        void onPostSettingsChanged();
     }
 
 }

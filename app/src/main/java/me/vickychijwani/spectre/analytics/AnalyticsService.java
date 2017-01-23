@@ -52,7 +52,7 @@ public class AnalyticsService {
     public void onLoginErrorEvent(LoginErrorEvent event) {
         if (event.wasInitiatedByUser) {
             String blogType = getBlogTypeFromUrl(event.blogUrl);
-            logLogin(blogType, true);
+            logLogin(blogType, false);
         }
     }
 
@@ -146,6 +146,14 @@ public class AnalyticsService {
 
     public static void logDraftDeleted() {
         logPostAction("Deleted draft", null);
+    }
+
+    public static void logConflictFound() {
+        logPostAction("Conflict found", null);
+    }
+
+    public static void logConflictResolved() {
+        logPostAction("Conflict resolved", null);
     }
 
     @Subscribe

@@ -1,14 +1,21 @@
 package me.vickychijwani.spectre.util;
 
+import android.annotation.SuppressLint;
 import android.content.Context;
 import android.support.annotation.ColorInt;
 import android.support.annotation.DrawableRes;
 import android.support.annotation.NonNull;
 import android.support.annotation.Nullable;
 import android.support.v4.content.ContextCompat;
+import android.util.Log;
 
+import com.crashlytics.android.Crashlytics;
+
+import java.util.Calendar;
 import java.util.Comparator;
+import java.util.Date;
 import java.util.List;
+import java.util.TimeZone;
 
 import me.vickychijwani.spectre.R;
 import me.vickychijwani.spectre.SpectreApplication;
@@ -53,12 +60,27 @@ public class PostUtils {
 
         // at this point, we know both lhs and rhs belong to the same group (new, scheduled, drafts,
         // published). NOTE: (-) sign because we want to sort in reverse chronological order.
-        if (isLhsPublished || isLhsScheduled) {
-            // use date published for sorting scheduled or published posts ...
-            return -lhs.getPublishedAt().compareTo(rhs.getPublishedAt());
+        if ((isLhsPublished || isLhsScheduled)) {
+            // FIXME Crashlytics issue #110 - published posts can have null date - why?
+            if (lhs.getPublishedAt() != null && rhs.getPublishedAt() != null) {
+                // use date published for sorting scheduled or published posts ...
+                return -lhs.getPublishedAt().compareTo(rhs.getPublishedAt());
+            }
         }
+
         // ... else use date modified (for drafts and new posts)
-        return -lhs.getUpdatedAt().compareTo(rhs.getUpdatedAt());
+        if (lhs.getUpdatedAt() != null && rhs.getUpdatedAt() != null) {
+            return -lhs.getUpdatedAt().compareTo(rhs.getUpdatedAt());
+        }
+
+        // fallback to creation date
+        if (lhs.getCreatedAt() != null && rhs.getCreatedAt() != null) {
+            return -lhs.getCreatedAt().compareTo(rhs.getCreatedAt());
+        }
+
+        // this is just paranoia
+        // higher id above, because it was likely created later
+        return -lhs.getId() + rhs.getId();
     };
 
     @SuppressWarnings({"RedundantIfStatement", "OverlyComplexMethod"})
@@ -81,6 +103,8 @@ public class PostUtils {
             return true;
         if (! tagListsMatch(original.getTags(), current.getTags()))
             return true;
+        if (original.isFeatured() != current.isFeatured())
+            return true;
         return false;
     }
 
@@ -89,9 +113,30 @@ public class PostUtils {
         UserPrefs prefs = UserPrefs.getInstance(SpectreApplication.getInstance());
         String blogUrl = prefs.getString(UserPrefs.Key.BLOG_URL);
         if (post.isPublished()) {
-            return NetworkUtils.makeAbsoluteUrl(blogUrl, post.getSlug());
+            String permalinkFormat = prefs.getString(UserPrefs.Key.PERMALINK_FORMAT);
+            Calendar calendar = Calendar.getInstance(TimeZone.getTimeZone("UTC"));
+            Date publishedAt = post.getPublishedAt();
+            // FIXME temp if check for Crashlytics issue #110
+            // Calendar.getInstance() is set to current time by default, and Ghost helpfully changes it to the correct date anyway
+            if (publishedAt != null) {
+                calendar.setTime(publishedAt);
+            }
+            @SuppressLint("DefaultLocale") String postPath = permalinkFormat
+                    .replace(":year", String.format("%04d", calendar.get(Calendar.YEAR)))
+                    // apparently months start from 0 but years and days start from 1 (wtf?)
+                    .replace(":month", String.format("%02d", calendar.get(Calendar.MONTH) + 1))
+                    .replace(":day", String.format("%02d", calendar.get(Calendar.DAY_OF_MONTH)))
+                    .replace(":slug", post.getSlug());
+            String postUrl = NetworkUtils.makeAbsoluteUrl(blogUrl, postPath);
+            // FIXME temp logs for Crashlytics issue #110
+            if (publishedAt == null) {
+                Crashlytics.log(Log.ERROR, "PostUtils", "PUBLISHED POST WITH NULL DATE FOUND!");
+                Crashlytics.log(Log.ERROR, "PostUtils", "Returning URL with current date instead: " + postUrl);
+                Crashlytics.logException(new IllegalStateException("PUBLISHED POSTS MUST NOT HAVE A NULL DATE!"));
+            }
+            return postUrl;
         } else if (post.isDraft() || post.isScheduled()) {
-            return NetworkUtils.makeAbsoluteUrl(blogUrl, "p/" + post.getUuid());
+            return NetworkUtils.makeAbsoluteUrl(blogUrl, "p/" + post.getUuid() + "/");
         } else {
             throw new IllegalArgumentException("URL not available for this post!");
         }

@@ -1,7 +1,6 @@
 package me.vickychijwani.spectre.view;
 
 import android.content.Intent;
-import android.content.pm.PackageInfo;
 import android.net.Uri;
 import android.os.Bundle;
 import android.support.v7.widget.Toolbar;
@@ -17,6 +16,7 @@ import me.vickychijwani.spectre.util.AppUtils;
 public class AboutActivity extends BaseActivity {
 
     public static final String URL_GITHUB_CONTRIBUTING = "https://github.com/vickychijwani/quill/blob/master/CONTRIBUTING.md#reporting-bugs";
+    public static final String URL_TRANSLATE = "https://hosted.weblate.org/engage/quill/en/";
     public static final String URL_MY_WEBSITE = "http://vickychijwani.me";
     public static final String URL_TWITTER_PROFILE = "https://twitter.com/vickychijwani";
     public static final String URL_GITHUB_REPO = "https://github.com/vickychijwani/quill";
@@ -36,11 +36,7 @@ public class AboutActivity extends BaseActivity {
         getSupportActionBar().setDisplayHomeAsUpEnabled(true);
         getSupportActionBar().setDisplayShowTitleEnabled(false);
 
-        PackageInfo packageInfo = AppUtils.getPackageInfo(this);
-        String version = getString(R.string.version_unknown);
-        if (packageInfo != null) {
-            version = packageInfo.versionName;
-        }
+        String version = AppUtils.getAppVersion(this);
         mVersionView.setText(version);
 
         mIconCreditsView.setMovementMethod(LinkMovementMethod.getInstance());
@@ -75,6 +71,11 @@ public class AboutActivity extends BaseActivity {
     @OnClick(R.id.about_report_bugs)
     public void onReportBugsClicked(View v) {
         openUrl(URL_GITHUB_CONTRIBUTING);
+    }
+
+    @OnClick(R.id.about_translate)
+    public void onTranslateClicked(View v) {
+        openUrl(URL_TRANSLATE);
     }
 
     @OnClick(R.id.about_play_store)

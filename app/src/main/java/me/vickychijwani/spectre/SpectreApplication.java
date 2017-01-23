@@ -67,7 +67,7 @@ public class SpectreApplication extends Application {
     }
 
     private void setupRealm() {
-        final int DB_SCHEMA_VERSION = 1;
+        final int DB_SCHEMA_VERSION = 3;
         RealmConfiguration config = new RealmConfiguration.Builder(this)
                 .schemaVersion(DB_SCHEMA_VERSION)
                 .migration(new DatabaseMigration())
@@ -82,7 +82,7 @@ public class SpectreApplication extends Application {
                 .addItalic(Typekit.createFromAsset(this, "fonts/OpenSans-Italic.ttf"))
                 .addBold(Typekit.createFromAsset(this, "fonts/OpenSans-Bold.ttf"))
                 .addBoldItalic(Typekit.createFromAsset(this, "fonts/OpenSans-BoldItalic.ttf"))
-                .addCustom1(Typekit.createFromAsset(this, "fonts/OpenSans-CondBold.ttf"));
+                .add("narrow-bold", Typekit.createFromAsset(this, "fonts/OpenSans-CondBold.ttf"));
     }
 
     public static SpectreApplication getInstance() {

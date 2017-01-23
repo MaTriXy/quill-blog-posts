@@ -39,6 +39,7 @@ import me.vickychijwani.spectre.BuildConfig;
 import me.vickychijwani.spectre.SpectreApplication;
 import me.vickychijwani.spectre.analytics.AnalyticsService;
 import me.vickychijwani.spectre.error.ExpiredTokenUsedException;
+import me.vickychijwani.spectre.error.PostConflictFoundException;
 import me.vickychijwani.spectre.error.TokenRevocationFailedException;
 import me.vickychijwani.spectre.event.ApiCallEvent;
 import me.vickychijwani.spectre.event.ApiErrorEvent;
@@ -65,6 +66,7 @@ import me.vickychijwani.spectre.event.LoginStartEvent;
 import me.vickychijwani.spectre.event.LogoutEvent;
 import me.vickychijwani.spectre.event.LogoutStatusEvent;
 import me.vickychijwani.spectre.event.PasswordChangedEvent;
+import me.vickychijwani.spectre.event.PostConflictFoundEvent;
 import me.vickychijwani.spectre.event.PostCreatedEvent;
 import me.vickychijwani.spectre.event.PostDeletedEvent;
 import me.vickychijwani.spectre.event.PostReplacedEvent;
@@ -156,7 +158,7 @@ public class NetworkService {
         if (AppState.getInstance(context).getBoolean(AppState.Key.LOGGED_IN)) {
             mAuthToken = mRealm.where(AuthToken.class).findFirst();
             String blogUrl = UserPrefs.getInstance(context).getString(UserPrefs.Key.BLOG_URL);
-            mApi = buildApiService(blogUrl);
+            mApi = buildApiService(blogUrl, true);
         }
     }
 
@@ -171,14 +173,16 @@ public class NetworkService {
     public void onLoginStartEvent(final LoginStartEvent event) {
         if (mbAuthRequestOnGoing) return;
         mbAuthRequestOnGoing = true;
-        mApi = buildApiService(event.blogUrl);
+        mApi = buildApiService(event.blogUrl, true);
+        GhostApiService mApiForClientSecret = buildApiService(event.blogUrl, false);
 
         // get dynamic client secret, if the blog supports it
-        mApi.getLoginPage(new ResponseCallback() {
+        mApiForClientSecret.getLoginPage(new ResponseCallback() {
             @Override
             public void success(Response response) {
                 String html = new String(((TypedByteArray) response.getBody()).getBytes());
-                Pattern clientSecretPattern = Pattern.compile("^.*<meta[ ]+name=['\"]env-clientSecret['\"][ ]+content=['\"]([^'\"]+)['\"].*$", Pattern.DOTALL);
+                // quotes around attribute values are optional in HTML5: http://stackoverflow.com/q/6495310/504611
+                Pattern clientSecretPattern = Pattern.compile("^.*<meta[ ]+name=['\"]?env-clientSecret['\"]?[ ]+content=['\"]?([^'\"]+)['\"]?.*$", Pattern.DOTALL);
                 Matcher matcher = clientSecretPattern.matcher(html);
                 if (matcher.matches()) {
                     String clientSecret = matcher.group(1);
@@ -352,6 +356,11 @@ public class NetworkService {
                 storeEtag(response.getHeaders(), ETag.TYPE_CURRENT_USER);
                 createOrUpdateModel(userList.users);
                 getBus().post(new UserLoadedEvent(userList.users.get(0)));
+
+                // download all posts again to enforce role-based permissions for this user
+                removeEtag(ETag.TYPE_ALL_POSTS);
+                getBus().post(new SyncPostsEvent(false));
+
                 refreshSucceeded(event);
             }
 
@@ -393,6 +402,7 @@ public class NetworkService {
             public void success(SettingsList settingsList, Response response) {
                 storeEtag(response.getHeaders(), ETag.TYPE_BLOG_SETTINGS);
                 createOrUpdateModel(settingsList.settings);
+                savePermalinkFormat(settingsList.settings);
                 getBus().post(new BlogSettingsLoadedEvent(settingsList.settings));
                 refreshSucceeded(event);
             }
@@ -492,6 +502,24 @@ public class NetworkService {
             public void success(PostList postList, Response response) {
                 storeEtag(response.getHeaders(), ETag.TYPE_ALL_POSTS);
 
+                // if this user is only an author, filter out posts they're not authorized to access
+                // FIXME if the last POSTS_FETCH_LIMIT number of posts are not owned by this author,
+                // FIXME we'll end up with no posts displayed in the UI!
+                RealmResults<User> users = mRealm.where(User.class).findAll();
+                if (users.size() > 0) {
+                    User user = users.first();
+                    if (user.hasOnlyAuthorRole()) {
+                        int currentUser = user.getId();
+                        // reverse iteration because in forward iteration, indices change on deleting
+                        for (int i = postList.posts.size()-1; i >= 0; --i) {
+                            Post post = postList.posts.get(i);
+                            if (post.getAuthor() != currentUser) {
+                                postList.posts.remove(i);
+                            }
+                        }
+                    }
+                }
+
                 // delete posts that are no longer present on the server
                 // this assumes that postList.posts is a list of ALL posts on the server
                 // FIXME time complexity is quadratic in the number of posts!
@@ -500,14 +528,18 @@ public class NetworkService {
                         .toList()
                         .forEach(NetworkService.this::deleteModels);
 
-                // skip posts with local-only edits (e.g., auto-saved edits to published posts)
+                // skip edited posts because they've not yet been uploaded
                 RealmResults<Post> localOnlyEdits = mRealm.where(Post.class)
                         .equalTo("pendingActions.type", PendingAction.EDIT_LOCAL)
+                        .or().equalTo("pendingActions.type", PendingAction.EDIT)
                         .findAll();
-                Observable.from(localOnlyEdits)
-                        .map(post -> postList.indexOf(post.getUuid()))
-                        .filter(idx -> idx > -1)
-                        .forEach(postList::remove);
+                for (int i = postList.posts.size()-1; i >= 0; --i) {
+                    for (int j = 0; j < localOnlyEdits.size(); ++j) {
+                        if (postList.posts.get(i).getUuid().equals(localOnlyEdits.get(j).getUuid())) {
+                            postList.posts.remove(i);
+                        }
+                    }
+                }
 
                 // make sure drafts have a publishedAt of FAR_FUTURE so they're sorted to the top
                 Observable.from(postList.posts)
@@ -515,6 +547,7 @@ public class NetworkService {
                         .forEach(post -> post.setPublishedAt(DateTimeUtils.FAR_FUTURE));
 
                 // now create / update received posts
+                // TODO use Realm#insertOrUpdate() for faster insertion here: https://realm.io/news/realm-java-1.1.0/
                 createOrUpdateModel(postList.posts);
                 getBus().post(new PostsLoadedEvent(getPostsSorted(), POSTS_FETCH_LIMIT));
 
@@ -540,6 +573,7 @@ public class NetworkService {
 
     @Subscribe
     public void onCreatePostEvent(final CreatePostEvent event) {
+        Crashlytics.log(Log.DEBUG, TAG, "[onCreatePostEvent] creating new post");
         Post newPost = new Post();
         newPost.addPendingAction(PendingAction.CREATE);
         newPost.setUuid(getTempUniqueId(Post.class));
@@ -558,15 +592,15 @@ public class NetworkService {
             return;
         }
 
-        final RealmResults<Post> localDeletedPosts = mRealm.where(Post.class)
+        final List<Post> localDeletedPosts = copyPosts(mRealm.where(Post.class)
                 .equalTo("pendingActions.type", PendingAction.DELETE)
-                .findAll();
-        final RealmResults<Post> localNewPosts = mRealm.where(Post.class)
+                .findAll());
+        final List<Post> localNewPosts = copyPosts(mRealm.where(Post.class)
                 .equalTo("pendingActions.type", PendingAction.CREATE)
-                .findAllSorted("uuid", Sort.DESCENDING);
-        final RealmResults<Post> localEditedPosts = mRealm.where(Post.class)
+                .findAllSorted("uuid", Sort.DESCENDING));
+        final List<Post> localEditedPosts = copyPosts(mRealm.where(Post.class)
                 .equalTo("pendingActions.type", PendingAction.EDIT)
-                .findAll();
+                .findAll());
 
         // nothing to upload
         if (localDeletedPosts.isEmpty() && localNewPosts.isEmpty() && localEditedPosts.isEmpty()
@@ -580,19 +614,28 @@ public class NetworkService {
 
         Deque<Post> mPostUploadQueue = new ArrayDeque<>();
 
-        // keep track of new posts created successfully, so the local copies can be deleted
-        List<Post> localNewPostsUploaded = new ArrayList<>();
+        // keep track of new posts created successfully and posts deleted successfully, so the local copies can be deleted
+        List<Post> postsToDelete = new ArrayList<>();
 
         // ugly hack (suggested by the IDE) because this must be declared "final"
         final RetrofitError[] uploadErrorOccurred = {null};
 
         final Action0 syncFinishedCB = () -> {
-            RetrofitError retrofitError = uploadErrorOccurred[0];
-            // delete local copies of only those new posts that were successfully uploaded
-            deleteModels(localNewPostsUploaded);
+            // delete local copies
+            if (!postsToDelete.isEmpty()) {
+                RealmQuery<Post> deleteQuery = mRealm.where(Post.class);
+                for (int i = 0; i < postsToDelete.size(); ++i) {
+                    Post post = postsToDelete.get(i);
+                    if (i > 0) deleteQuery.or();
+                    deleteQuery.equalTo("uuid", post.getUuid());
+                }
+                deleteModels(deleteQuery.findAll());
+            }
+
             // if forceNetworkCall is true, first load from the db, AND only then from the network,
             // to avoid a crash because local posts have been deleted above but are still being
             // displayed, so we need to refresh the UI first
+            RetrofitError retrofitError = uploadErrorOccurred[0];
             if (retrofitError != null && NetworkUtils.isUnauthorized(retrofitError)) {
                 // defer the event and try to re-authorize
                 refreshAccessToken(event);
@@ -615,7 +658,6 @@ public class NetworkService {
             uploadErrorOccurred[0] = retrofitError;
             mPostUploadQueue.removeFirstOccurrence(post);
             getBus().post(new ApiErrorEvent(retrofitError));
-            getBus().post(new PostsLoadedEvent(getPostsSorted(), POSTS_FETCH_LIMIT));
             if (mPostUploadQueue.isEmpty()) syncFinishedCB.call();
         };
 
@@ -628,13 +670,13 @@ public class NetworkService {
         // this is unlike JavaScript, in which the same loop variable is mutated
         for (final Post localPost : localDeletedPosts) {
             if (! validateAccessToken(event)) return;
+            Crashlytics.log(Log.DEBUG, TAG, "[onSyncPostsEvent] deleting post id = " + localPost.getId());
             mApi.deletePost(localPost.getId(), new ResponseCallback() {
                 @Override
                 public void success(Response response) {
                     AnalyticsService.logDraftDeleted();
                     mPostUploadQueue.removeFirstOccurrence(localPost);
-                    clearPendingActionsOnPost(localPost);
-                    deleteModel(localPost);
+                    postsToDelete.add(localPost);
                     if (mPostUploadQueue.isEmpty()) syncFinishedCB.call();
                 }
 
@@ -646,18 +688,16 @@ public class NetworkService {
         }
 
         // 2. NEW POSTS
-        // the loop variable is *local* to the loop block, so it can be captured in a closure easily
-        // this is unlike JavaScript, in which the same loop variable is mutated
         for (final Post localPost : localNewPosts) {
             if (! validateAccessToken(event)) return;
+            Crashlytics.log(Log.DEBUG, TAG, "[onSyncPostsEvent] creating post");    // local new posts don't have an id
             mApi.createPost(PostStubList.from(localPost), new Callback<PostList>() {
                 @Override
                 public void success(PostList postList, Response response) {
                     AnalyticsService.logNewDraftUploaded();
-                    clearPendingActionsOnPost(localPost);
                     createOrUpdateModel(postList.posts);
                     mPostUploadQueue.removeFirstOccurrence(localPost);
-                    localNewPostsUploaded.add(localPost);
+                    postsToDelete.add(localPost);
                     // FIXME this is a new post! how do subscribers know which post changed?
                     getBus().post(new PostReplacedEvent(postList.posts.get(0)));
                     if (mPostUploadQueue.isEmpty()) syncFinishedCB.call();
@@ -671,24 +711,58 @@ public class NetworkService {
         }
 
         // 3. EDITED POSTS
-        // the loop variable is *local* to the loop block, so it can be captured in a closure easily
-        // this is unlike JavaScript, in which the same loop variable is mutated
-        for (final Post localPost : localEditedPosts) {
-            if (! validateAccessToken(event)) return;
-            PostStubList postStubList = PostStubList.from(localPost);
-            mApi.updatePost(localPost.getId(), postStubList, new Callback<PostList>() {
+        Action1<Post> uploadEditedPost = (editedPost) -> {
+            Crashlytics.log(Log.DEBUG, TAG, "[onSyncPostsEvent] updating post id = " + editedPost.getId());
+            PostStubList postStubList = PostStubList.from(editedPost);
+            mApi.updatePost(editedPost.getId(), postStubList, new Callback<PostList>() {
                 @Override
                 public void success(PostList postList, Response response) {
-                    clearPendingActionsOnPost(localPost);
                     createOrUpdateModel(postList.posts);
-                    mPostUploadQueue.removeFirstOccurrence(localPost);
-                    getBus().post(new PostSyncedEvent(localPost.getUuid()));
+                    mPostUploadQueue.removeFirstOccurrence(editedPost);
+                    getBus().post(new PostSyncedEvent(editedPost.getUuid()));
                     if (mPostUploadQueue.isEmpty()) syncFinishedCB.call();
                 }
 
                 @Override
                 public void failure(RetrofitError error) {
-                    onFailure.call(localPost, error);
+                    onFailure.call(editedPost, error);
+                }
+            });
+        };
+        for (final Post localPost : localEditedPosts) {
+            if (! validateAccessToken(event)) return;
+            Crashlytics.log(Log.DEBUG, TAG, "[onSyncPostsEvent] downloading edited post with id = " + localPost.getId() + " for comparison");
+            mApi.getPost(localPost.getId(), new Callback<PostList>() {
+                @Override
+                public void success(PostList postList, Response response) {
+                    Post serverPost = null;
+                    boolean hasConflict = false;
+                    if (!postList.posts.isEmpty()) {
+                        serverPost = postList.posts.get(0);
+                        hasConflict = (serverPost.getUpdatedAt() != null
+                                && !serverPost.getUpdatedAt().equals(localPost.getUpdatedAt()));
+                    }
+                    if (hasConflict && PostUtils.isDirty(serverPost, localPost)) {
+                        Crashlytics.log(Log.WARN, TAG, "[onSyncPostsEvent] conflict found for post id = " + localPost.getId());
+                        mPostUploadQueue.removeFirstOccurrence(localPost);
+                        if (mPostUploadQueue.isEmpty()) syncFinishedCB.call();
+                        localPost.setConflictState(Post.CONFLICT_UNRESOLVED);
+                        createOrUpdateModel(localPost);
+                        Crashlytics.log(Log.DEBUG, TAG, "localPost updated at:" + localPost.getUpdatedAt().toString());
+                        Crashlytics.log(Log.DEBUG, TAG, "serverPost updated at: " + serverPost.getUpdatedAt().toString());
+                        Crashlytics.log(Log.DEBUG, TAG, "localPost contents:\n" + localPost.getMarkdown());
+                        Crashlytics.log(Log.DEBUG, TAG, "serverPost contents:\n" + serverPost.getMarkdown());
+                        Crashlytics.logException(new PostConflictFoundException());
+                        getBus().post(new PostConflictFoundEvent(localPost, serverPost));
+                    } else {
+                        uploadEditedPost.call(localPost);
+                    }
+                }
+
+                @Override
+                public void failure(RetrofitError error) {
+                    // if we can't get the server post, optimistically upload the local copy
+                    uploadEditedPost.call(localPost);
                 }
             });
         }
@@ -700,11 +774,11 @@ public class NetworkService {
         Post realmPost = mRealm.where(Post.class)
                 .equalTo("id", event.post.getId())
                 .findFirst();
+        Crashlytics.log(Log.DEBUG, TAG, "[onSavePostEvent] post id = " + event.post.getId());
 
         if (realmPost.hasPendingAction(PendingAction.DELETE)) {
             RuntimeException e = new IllegalArgumentException("Trying to save deleted post with id = " + realmPost.getId());
-            Crashlytics.log(Log.ERROR, TAG, e.getMessage());
-            throw e;
+            Crashlytics.logException(e);
         }
 
         // TODO bug in edge-case:
@@ -722,7 +796,8 @@ public class NetworkService {
             }
         }
 
-        updatedPost.setUpdatedAt(new Date());              // mark as updated, to promote in sorted order
+        // don't set updatedAt to enable easy conflict detection by comparing updatedAt values
+        //updatedPost.setUpdatedAt(new Date());              // mark as updated, to promote in sorted order
         createOrUpdateModel(updatedPost);                  // save the local post to db
 
         // must set PendingActions after other stuff, else the updated post's pending actions will
@@ -747,11 +822,12 @@ public class NetworkService {
     @Subscribe
     public void onDeletePostEvent(DeletePostEvent event) {
         int postId = event.post.getId();
+        Crashlytics.log(Log.DEBUG, TAG, "[onDeletePostEvent] post id = " + postId);
+
         Post realmPost = mRealm.where(Post.class).equalTo("id", postId).findFirst();
         if (realmPost == null) {
             RuntimeException e = new IllegalArgumentException("Trying to delete post with non-existent id = " + postId);
-            Crashlytics.log(Log.ERROR, TAG, e.getMessage());
-            throw e;
+            Crashlytics.logException(e);
         } else if (realmPost.hasPendingAction(PendingAction.CREATE)) {
             deleteModel(realmPost);
             getBus().post(new PostDeletedEvent(postId));
@@ -769,6 +845,8 @@ public class NetworkService {
     @Subscribe
     public void onFileUploadEvent(FileUploadEvent event) {
         if (! validateAccessToken(event)) return;
+        Crashlytics.log(Log.DEBUG, TAG, "[onFileUploadEvent] uploading file");
+
         TypedFile typedFile = new TypedFile(event.mimeType, new File(event.path));
         mApi.uploadFile(typedFile, new Callback<String>() {
             @Override
@@ -778,11 +856,11 @@ public class NetworkService {
 
             @Override
             public void failure(RetrofitError error) {
-                getBus().post(new FileUploadErrorEvent(error));
                 if (NetworkUtils.isUnauthorized(error)) {
                     // defer the event and try to re-authorize
                     refreshAccessToken(event);
                 } else if (NetworkUtils.isRealError(error)) {
+                    getBus().post(new FileUploadErrorEvent(error));
                     getBus().post(new ApiErrorEvent(error));
                 }
             }
@@ -850,16 +928,6 @@ public class NetworkService {
 
 
     // private methods
-    private void clearPendingActionsOnPost(@NonNull Post post) {
-        List<PendingAction> pendingActions = new ArrayList<>(post.getPendingActions());
-        mRealm.executeTransaction(realm -> {
-            for (PendingAction pa : pendingActions) {
-                RealmObject.deleteFromRealm(pa);
-            }
-            pendingActions.clear();
-        });
-    }
-
     private void clearAndSetPendingActionOnPost(@NonNull Post post, @PendingAction.Type String newPendingAction) {
         List<PendingAction> pendingActions = post.getPendingActions();
         mRealm.executeTransaction(realm -> {
@@ -961,6 +1029,15 @@ public class NetworkService {
         appState.clear(AppState.Key.LOGGED_IN);
     }
 
+    private void savePermalinkFormat(List<Setting> settings) {
+        for (Setting setting : settings) {
+            if ("permalinks".equals(setting.getKey())) {
+                UserPrefs.getInstance(SpectreApplication.getInstance())
+                        .setString(UserPrefs.Key.PERMALINK_FORMAT, setting.getValue());
+            }
+        }
+    }
+
     private void postLoginStartEvent() {
         UserPrefs prefs = UserPrefs.getInstance(SpectreApplication.getInstance());
         String blogUrl = prefs.getString(UserPrefs.Key.BLOG_URL);
@@ -992,12 +1069,16 @@ public class NetworkService {
         return DateTimeUtils.getEpochSeconds() > mAuthToken.getCreatedAt() + 86400 - 60;
     }
 
-    private GhostApiService buildApiService(@NonNull String blogUrl) {
+    private GhostApiService buildApiService(@NonNull String blogUrl, boolean useApiBaseUrl) {
+        String baseUrl = blogUrl;
+        if (useApiBaseUrl) {
+            baseUrl = NetworkUtils.makeAbsoluteUrl(blogUrl, "ghost/api/v0.1");
+        }
         RestAdapter.LogLevel logLevel = BuildConfig.DEBUG
                 ? RestAdapter.LogLevel.HEADERS
                 : RestAdapter.LogLevel.NONE;
         RestAdapter restAdapter = new RestAdapter.Builder()
-                .setEndpoint(NetworkUtils.makeAbsoluteUrl(blogUrl, "ghost/api/v0.1"))
+                .setEndpoint(baseUrl)
                 .setClient(new OkClient(mOkHttpClient))
                 .setConverter(mGsonConverter)
                 .setRequestInterceptor(mAuthInterceptor)
@@ -1009,10 +1090,7 @@ public class NetworkService {
     private List<Post> getPostsSorted() {
         // FIXME time complexity O(n) for copying + O(n log n) for sorting!
         RealmResults<Post> realmPosts = mRealm.where(Post.class).findAll();
-        List<Post> unmanagedPosts = new ArrayList<>(realmPosts.size());
-        for (Post realmPost : realmPosts) {
-            unmanagedPosts.add(new Post(realmPost));
-        }
+        List<Post> unmanagedPosts = copyPosts(realmPosts);
         Collections.sort(unmanagedPosts, PostUtils.COMPARATOR_MAIN_LIST);
         return unmanagedPosts;
     }
@@ -1031,6 +1109,13 @@ public class NetworkService {
         return (etag != null) ? etag.getTag() : "";
     }
 
+    private void removeEtag(@ETag.Type String etagType) {
+        RealmResults<ETag> etags = mRealm.where(ETag.class).equalTo("type", etagType).findAll();
+        if (etags.size() > 0) {
+            deleteModel(etags.first());
+        }
+    }
+
     /**
      * Generates a temporary primary key until the actual id is generated by the server. <b>Be
      * careful when calling this in a loop, if you don't save the object before calling it again,
@@ -1043,6 +1128,14 @@ public class NetworkService {
             --tempId;
         }
         return String.valueOf(tempId);
+    }
+
+    private List<Post> copyPosts(List<Post> posts) {
+        List<Post> copied = new ArrayList<>(posts.size());
+        for (Post model : posts) {
+            copied.add(new Post(model));
+        }
+        return copied;
     }
 
     private <T extends RealmModel> T createOrUpdateModel(T object) {
