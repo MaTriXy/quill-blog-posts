@@ -5,6 +5,8 @@ import android.graphics.Canvas;
 import android.graphics.Paint;
 import android.graphics.RectF;
 import android.support.annotation.ColorInt;
+import android.support.annotation.NonNull;
+import android.support.v7.widget.AppCompatMultiAutoCompleteTextView;
 import android.text.Editable;
 import android.text.Spannable;
 import android.text.SpannableString;
@@ -29,7 +31,8 @@ import me.vickychijwani.spectre.util.DeviceUtils;
 /**
  * Adapted from https://github.com/kpbird/chipsedittext/blob/master/src/com/kpbird/chipsedittext/ChipsMultiAutoCompleteTextview.java
  */
-public class ChipsEditText extends MultiAutoCompleteTextView implements AdapterView.OnItemClickListener {
+@SuppressWarnings("SameParameterValue")
+public class ChipsEditText extends AppCompatMultiAutoCompleteTextView implements AdapterView.OnItemClickListener {
 
     private Pattern mTokenPattern;
     @ColorInt private int mChipBgColor;
@@ -167,7 +170,7 @@ public class ChipsEditText extends MultiAutoCompleteTextView implements AdapterV
         }
 
         @Override
-        public int getSize(Paint paint, CharSequence text, int start, int end,
+        public int getSize(@NonNull Paint paint, CharSequence text, int start, int end,
                            Paint.FontMetricsInt fm) {
             return (int) (mLeftPadding + paint.measureText(text, start, end) + mRightPadding);
             // this is supposed to work but isn't
@@ -196,8 +199,8 @@ public class ChipsEditText extends MultiAutoCompleteTextView implements AdapterV
         }
 
         @Override
-        public void draw(Canvas canvas, CharSequence text, int start, int end, float x, int top,
-                         int y, int bottom, Paint paint) {
+        public void draw(@NonNull Canvas canvas, CharSequence text, int start, int end, float x,
+                         int top, int y, int bottom, @NonNull Paint paint) {
 //            canvas.translate(mLeftMargin, mTopMargin);
             float width = paint.measureText(text.subSequence(start, end).toString());
             float newBottom = bottom - 2;   // magic number to make sure consecutive lines don't touch

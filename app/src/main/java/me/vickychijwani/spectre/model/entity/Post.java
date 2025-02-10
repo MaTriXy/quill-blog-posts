@@ -39,9 +39,10 @@ public class Post implements RealmModel, Parcelable {
     private static final String DEFAULT_TITLE = "(Untitled)";
     public static final String DEFAULT_SLUG_PREFIX = "untitled";
 
-    @PrimaryKey @Required
+    @PrimaryKey
+    private String id;
+
     private String uuid = null;
-    private int id;
 
     @Required
     private String title = DEFAULT_TITLE;
@@ -55,21 +56,23 @@ public class Post implements RealmModel, Parcelable {
     @Required
     private String markdown = "";
 
+    private String mobiledoc = "";
+
     private String html = "";
 
     private RealmList<Tag> tags;
 
-    private String image = null;
+    private String featureImage = null;
     private boolean featured = false;
     private boolean page = false;
 
     @Required
     private String language = "en_US";
 
-    private int author;
-    private int createdBy;
-    private int updatedBy;
-    private int publishedBy;
+    private String author;
+    private String createdBy;
+    private String updatedBy;
+    private String publishedBy;
 
     private Date createdAt = null;
     private Date publishedAt = DateTimeUtils.FAR_FUTURE;  // so that locally-created posts will be sorted to the top
@@ -79,6 +82,8 @@ public class Post implements RealmModel, Parcelable {
 
     private String metaTitle = "";
     private String metaDescription = "";
+
+    private String customExcerpt = null;
 
     // exclude from serialization / deserialization
     // NOTE: default values for these fields will be assigned to all serialized Posts (because they
@@ -91,14 +96,15 @@ public class Post implements RealmModel, Parcelable {
 
     public Post() {}
 
-    // TODO remember to update this, equals, Parcelable methods, and DB migration whenever fields are changed!
+    // TODO remember to update this, equals, Parcelable methods, PostUtils.isDirty() and DB migration whenever fields are changed!
     public Post(@NonNull Post post) {
-        this.setUuid(post.getUuid());
         this.setId(post.getId());
+        this.setUuid(post.getUuid());
         this.setTitle(post.getTitle());
         this.setSlug(post.getSlug());
         this.setStatus(post.getStatus());
         this.setMarkdown(post.getMarkdown());
+        this.setMobiledoc(post.getMobiledoc());
         this.setHtml(post.getHtml());
 
         List<Tag> realmTags = post.getTags();
@@ -108,7 +114,7 @@ public class Post implements RealmModel, Parcelable {
         }
         this.setTags(unmanagedTags);
 
-        this.setImage(post.getImage());
+        this.setFeatureImage(post.getFeatureImage());
         this.setFeatured(post.isFeatured());
         this.setPage(post.isPage());
         this.setLanguage(post.getLanguage());
@@ -125,6 +131,8 @@ public class Post implements RealmModel, Parcelable {
         this.setMetaTitle(post.getMetaTitle());
         this.setMetaDescription(post.getMetaDescription());
 
+        this.setCustomExcerpt(post.getCustomExcerpt());
+
         for (PendingAction action : post.getPendingActions()) {
             this.addPendingAction(action.getType());
         }
@@ -138,13 +146,10 @@ public class Post implements RealmModel, Parcelable {
         if (o == null || getClass() != o.getClass()) return false;
 
         Post post = (Post) o;
-        if (getId() != post.getId()) return false;
         if (isFeatured() != post.isFeatured()) return false;
         if (isPage() != post.isPage()) return false;
-        if (getAuthor() != post.getAuthor()) return false;
-        if (getCreatedBy() != post.getCreatedBy()) return false;
-        if (getUpdatedBy() != post.getUpdatedBy()) return false;
-        if (getPublishedBy() != post.getPublishedBy()) return false;
+        if (getId() != null ? !getId().equals(post.getId()) : post.getId() != null)
+            return false;
         if (getUuid() != null ? !getUuid().equals(post.getUuid()) : post.getUuid() != null)
             return false;
         if (getTitle() != null ? !getTitle().equals(post.getTitle()) : post.getTitle() != null)
@@ -155,13 +160,23 @@ public class Post implements RealmModel, Parcelable {
             return false;
         if (getMarkdown() != null ? !getMarkdown().equals(post.getMarkdown()) : post.getMarkdown() != null)
             return false;
+        if (getMobiledoc() != null ? !getMobiledoc().equals(post.getMobiledoc()) : post.getMobiledoc() != null)
+            return false;
         if (getHtml() != null ? !getHtml().equals(post.getHtml()) : post.getHtml() != null)
             return false;
         if (getTags() != null ? !getTags().equals(post.getTags()) : post.getTags() != null)
             return false;
-        if (getImage() != null ? !getImage().equals(post.getImage()) : post.getImage() != null)
+        if (getFeatureImage() != null ? !getFeatureImage().equals(post.getFeatureImage()) : post.getFeatureImage() != null)
             return false;
         if (getLanguage() != null ? !getLanguage().equals(post.getLanguage()) : post.getLanguage() != null)
+            return false;
+        if (getAuthor() != null ? !getAuthor().equals(post.getAuthor()) : post.getAuthor() != null)
+            return false;
+        if (getCreatedBy() != null ? !getCreatedBy().equals(post.getCreatedBy()) : post.getCreatedBy() != null)
+            return false;
+        if (getUpdatedBy() != null ? !getUpdatedBy().equals(post.getUpdatedBy()) : post.getUpdatedBy() != null)
+            return false;
+        if (getPublishedBy() != null ? !getPublishedBy().equals(post.getPublishedBy()) : post.getPublishedBy() != null)
             return false;
         if (getCreatedAt() != null ? !getCreatedAt().equals(post.getCreatedAt()) : post.getCreatedAt() != null)
             return false;
@@ -172,6 +187,8 @@ public class Post implements RealmModel, Parcelable {
         if (getMetaTitle() != null ? !getMetaTitle().equals(post.getMetaTitle()) : post.getMetaTitle() != null)
             return false;
         if (getMetaDescription() != null ? !getMetaDescription().equals(post.getMetaDescription()) : post.getMetaDescription() != null)
+            return false;
+        if (getCustomExcerpt() != null ? !getCustomExcerpt().equals(post.getCustomExcerpt()) : post.getCustomExcerpt() != null)
             return false;
         if (getPendingActions() != null ? !getPendingActions().equals(post.getPendingActions()) : post.getPendingActions() != null)
             return false;
@@ -188,50 +205,53 @@ public class Post implements RealmModel, Parcelable {
 
     @Override
     public void writeToParcel(Parcel dest, int flags) {
+        dest.writeString(this.id);
         dest.writeString(this.uuid);
-        dest.writeInt(this.id);
         dest.writeString(this.title);
         dest.writeString(this.slug);
         dest.writeString(this.status);
         dest.writeString(this.markdown);
+        dest.writeString(this.mobiledoc);
         dest.writeString(this.html);
         dest.writeList(this.tags);
-        dest.writeString(this.image);
+        dest.writeString(this.featureImage);
         dest.writeByte(this.featured ? (byte) 1 : (byte) 0);
         dest.writeByte(this.page ? (byte) 1 : (byte) 0);
         dest.writeString(this.language);
-        dest.writeInt(this.author);
-        dest.writeInt(this.createdBy);
-        dest.writeInt(this.updatedBy);
-        dest.writeInt(this.publishedBy);
+        dest.writeString(this.author);
+        dest.writeString(this.createdBy);
+        dest.writeString(this.updatedBy);
+        dest.writeString(this.publishedBy);
         dest.writeLong(this.createdAt != null ? this.createdAt.getTime() : -1);
         dest.writeLong(this.updatedAt != null ? this.updatedAt.getTime() : -1);
         dest.writeLong(this.publishedAt != null ? this.publishedAt.getTime() : -1);
         dest.writeString(this.metaTitle);
         dest.writeString(this.metaDescription);
+        dest.writeString(this.customExcerpt);
         dest.writeList(this.pendingActions);
         dest.writeString(this.conflictState);
     }
 
     protected Post(Parcel in) {
+        this.id = in.readString();
         this.uuid = in.readString();
-        this.id = in.readInt();
         this.title = in.readString();
         this.slug = in.readString();
         //noinspection WrongConstant
         this.status = in.readString();
         this.markdown = in.readString();
+        this.mobiledoc = in.readString();
         this.html = in.readString();
         this.tags = new RealmList<>();
         in.readList(this.tags, Tag.class.getClassLoader());
-        this.image = in.readString();
+        this.featureImage = in.readString();
         this.featured = in.readByte() != 0;
         this.page = in.readByte() != 0;
         this.language = in.readString();
-        this.author = in.readInt();
-        this.createdBy = in.readInt();
-        this.updatedBy = in.readInt();
-        this.publishedBy = in.readInt();
+        this.author = in.readString();
+        this.createdBy = in.readString();
+        this.updatedBy = in.readString();
+        this.publishedBy = in.readString();
         long tmpCreatedAt = in.readLong();
         this.createdAt = tmpCreatedAt == -1 ? null : new Date(tmpCreatedAt);
         long tmpUpdatedAt = in.readLong();
@@ -240,6 +260,7 @@ public class Post implements RealmModel, Parcelable {
         this.publishedAt = tmpPublishedAt == -1 ? null : new Date(tmpPublishedAt);
         this.metaTitle = in.readString();
         this.metaDescription = in.readString();
+        this.customExcerpt = in.readString();
         this.pendingActions = new RealmList<>();
         in.readList(this.pendingActions, PendingAction.class.getClassLoader());
         //noinspection WrongConstant
@@ -261,20 +282,20 @@ public class Post implements RealmModel, Parcelable {
 
 
     // accessors
+    public String getId() {
+        return id;
+    }
+
+    public void setId(String id) {
+        this.id = id;
+    }
+
     public String getUuid() {
         return uuid;
     }
 
     public void setUuid(String uuid) {
         this.uuid = uuid;
-    }
-
-    public int getId() {
-        return id;
-    }
-
-    public void setId(int id) {
-        this.id = id;
     }
 
     public String getTitle() {
@@ -309,6 +330,14 @@ public class Post implements RealmModel, Parcelable {
         this.markdown = markdown;
     }
 
+    public String getMobiledoc() {
+        return mobiledoc;
+    }
+
+    public void setMobiledoc(String mobiledoc) {
+        this.mobiledoc = mobiledoc;
+    }
+
     public String getHtml() {
         return html;
     }
@@ -325,12 +354,12 @@ public class Post implements RealmModel, Parcelable {
         this.tags = tags;
     }
 
-    public String getImage() {
-        return image;
+    public String getFeatureImage() {
+        return featureImage;
     }
 
-    public void setImage(String image) {
-        this.image = image;
+    public void setFeatureImage(String featureImage) {
+        this.featureImage = featureImage;
     }
 
     public boolean isFeatured() {
@@ -357,35 +386,35 @@ public class Post implements RealmModel, Parcelable {
         this.language = language;
     }
 
-    public int getAuthor() {
+    public String getAuthor() {
         return author;
     }
 
-    public void setAuthor(int author) {
+    public void setAuthor(String author) {
         this.author = author;
     }
 
-    public int getCreatedBy() {
+    public String getCreatedBy() {
         return createdBy;
     }
 
-    public void setCreatedBy(int createdBy) {
+    public void setCreatedBy(String createdBy) {
         this.createdBy = createdBy;
     }
 
-    public int getUpdatedBy() {
+    public String getUpdatedBy() {
         return updatedBy;
     }
 
-    public void setUpdatedBy(int updatedBy) {
+    public void setUpdatedBy(String updatedBy) {
         this.updatedBy = updatedBy;
     }
 
-    public int getPublishedBy() {
+    public String getPublishedBy() {
         return publishedBy;
     }
 
-    public void setPublishedBy(int publishedBy) {
+    public void setPublishedBy(String publishedBy) {
         this.publishedBy = publishedBy;
     }
 
@@ -427,6 +456,14 @@ public class Post implements RealmModel, Parcelable {
 
     public void setMetaDescription(String metaDesc) {
         this.metaDescription = metaDesc;
+    }
+
+    public String getCustomExcerpt() {
+        return customExcerpt;
+    }
+
+    public void setCustomExcerpt(String customExcerpt) {
+        this.customExcerpt = customExcerpt;
     }
 
     public RealmList<PendingAction> getPendingActions() {

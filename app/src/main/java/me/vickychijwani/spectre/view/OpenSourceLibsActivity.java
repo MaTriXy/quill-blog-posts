@@ -18,7 +18,7 @@ import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
 
-import butterknife.Bind;
+import butterknife.BindView;
 import butterknife.ButterKnife;
 import me.vickychijwani.spectre.R;
 
@@ -36,17 +36,17 @@ public class OpenSourceLibsActivity extends BaseActivity {
             new Library("Realm", "Realm Inc.", "http://realm.io/"),
             new Library("Retrofit", "Square Inc.", "http://square.github.io/retrofit/"),
             new Library("RxAndroid", "ReactiveX", "https://github.com/ReactiveX/RxAndroid"),
-            new Library("RxLifecycle", "Trello Inc.", "https://github.com/trello/RxLifecycle"),
             new Library("Showdown", "ShowdownJS and Hannah Wolfe", "https://github.com/ErisDS/showdown/"),
             new Library("Slugify", "Danny Trunk", "https://github.com/slugify/slugify"),
             new Library("Stetho", "Facebook Inc.", "http://facebook.github.io/stetho/"),
+            new Library("Timber", "Jake Wharton", "https://github.com/JakeWharton/timber"),
             new Library("Typekit", "Hien Ngo", "https://github.com/tsengvn/typekit")
     );
 
     private LibsAdapter mLibsAdapter;
 
-    @Bind(R.id.toolbar) Toolbar mToolbar;
-    @Bind(R.id.libs_list) RecyclerView mLibsList;
+    @BindView(R.id.toolbar) Toolbar mToolbar;
+    @BindView(R.id.libs_list) RecyclerView mLibsList;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -117,8 +117,8 @@ public class OpenSourceLibsActivity extends BaseActivity {
         }
 
         static class LibraryViewHolder extends RecyclerView.ViewHolder {
-            @Bind(R.id.lib_name) TextView name;
-            @Bind(R.id.lib_author) TextView author;
+            @BindView(R.id.lib_name) TextView name;
+            @BindView(R.id.lib_author) TextView author;
 
             public LibraryViewHolder(@NonNull View view, View.OnClickListener clickListener) {
                 super(view);

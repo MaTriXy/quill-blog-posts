@@ -4,35 +4,23 @@ import android.content.Context;
 import android.net.ConnectivityManager;
 import android.net.NetworkInfo;
 import android.support.annotation.NonNull;
-import android.support.annotation.StringDef;
+import android.support.annotation.Nullable;
 
-import com.squareup.okhttp.Call;
-import com.squareup.okhttp.OkHttpClient;
-import com.squareup.okhttp.Request;
-
-import java.io.IOException;
-import java.lang.annotation.Retention;
-import java.lang.annotation.RetentionPolicy;
+import java.net.ConnectException;
 import java.net.HttpURLConnection;
-import java.net.URL;
-import java.util.concurrent.TimeUnit;
+import java.net.MalformedURLException;
+import java.net.SocketTimeoutException;
+import java.net.UnknownHostException;
 
-import retrofit.RetrofitError;
-import retrofit.client.Response;
-import rx.Observable;
-import rx.android.schedulers.AndroidSchedulers;
-import rx.schedulers.Schedulers;
-import rx.subscriptions.Subscriptions;
+import javax.net.ssl.SSLHandshakeException;
+
+import io.reactivex.Single;
+import me.vickychijwani.spectre.error.UrlNotFoundException;
+import okhttp3.Call;
+import retrofit2.HttpException;
+import retrofit2.Response;
 
 public class NetworkUtils {
-
-
-    @Retention(RetentionPolicy.SOURCE)
-    @StringDef({SCHEME_HTTP, SCHEME_HTTPS})
-    public @interface Scheme {}
-
-    public static final String SCHEME_HTTP = "http://";
-    public static final String SCHEME_HTTPS = "https://";
 
     /**
      * Check whether there is any network with a usable connection.
@@ -44,24 +32,78 @@ public class NetworkUtils {
         return activeNetworkInfo != null && activeNetworkInfo.isConnected();
     }
 
-    public static boolean isRealError(@NonNull RetrofitError retrofitError) {
-        Response response = retrofitError.getResponse();
+    public static boolean isUnauthorized(@Nullable Response response) {
         if (response == null) {
-            // consider this an error, to be safer
-            return true;
-        } else if (response.getStatus() == HttpURLConnection.HTTP_NOT_MODIFIED) {
-            // HTTP 304 is not exactly an error
             return false;
         }
-        return true;
-    }
-
-    public static boolean isUnauthorized(@NonNull RetrofitError retrofitError) {
-        Response response = retrofitError.getResponse();
         // Ghost returns 403 Forbidden in some cases, inappropriately
         // see this for what 401 vs 403 should mean: http://stackoverflow.com/a/3297081/504611
-        return response != null && (response.getStatus() == HttpURLConnection.HTTP_UNAUTHORIZED
-                        || response.getStatus() == HttpURLConnection.HTTP_FORBIDDEN);
+        return response.code() == HttpURLConnection.HTTP_UNAUTHORIZED
+                || response.code() == HttpURLConnection.HTTP_FORBIDDEN;
+    }
+
+    public static boolean isUnauthorized(@Nullable Throwable e) {
+        if (e == null || !(e instanceof HttpException)) {
+            return false;
+        }
+        HttpException httpEx = (HttpException) e;
+        // Ghost returns 403 Forbidden in some cases, inappropriately
+        // see this for what 401 vs 403 should mean: http://stackoverflow.com/a/3297081/504611
+        return httpEx.code() == HttpURLConnection.HTTP_UNAUTHORIZED
+                || httpEx.code() == HttpURLConnection.HTTP_FORBIDDEN;
+    }
+
+    public static boolean isNotModified(@Nullable Response response) {
+        //noinspection SimplifiableIfStatement
+        if (response == null) {
+            return false;
+        }
+        return response.code() == HttpURLConnection.HTTP_NOT_MODIFIED;
+    }
+
+    public static boolean isNotFound(@Nullable Throwable e) {
+        if (e == null || !(e instanceof HttpException)) {
+            return false;
+        }
+        HttpException httpEx = (HttpException) e;
+        return httpEx.code() == HttpURLConnection.HTTP_NOT_FOUND;
+    }
+
+    public static boolean isUnprocessableEntity(@Nullable Throwable e) {
+        if (e == null || !(e instanceof HttpException)) {
+            return false;
+        }
+        HttpException httpEx = (HttpException) e;
+        return httpEx.code() == 422;
+    }
+
+    public static boolean isTooManyRequests(@Nullable Throwable e) {
+        if (e == null || !(e instanceof HttpException)) {
+            return false;
+        }
+        HttpException httpEx = (HttpException) e;
+        return httpEx.code() == 429;  // too many requests
+    }
+
+    public static boolean isUnrecoverableError(@Nullable Response response) {
+        if (response == null) {
+            return false;
+        }
+        return response.code() >= 400 && isUnauthorized(response);
+    }
+
+    public static boolean isConnectionError(Throwable error) {
+        return error instanceof ConnectException || error instanceof SocketTimeoutException;
+    }
+
+    public static boolean isUserNetworkError(Throwable error) {
+        // user provided a malformed / non-existent URL
+        return error instanceof UnknownHostException || error instanceof MalformedURLException
+                || error instanceof UrlNotFoundException;
+    }
+
+    public static boolean isSslError(Throwable error) {
+        return error instanceof SSLHandshakeException;
     }
 
     public static String makeAbsoluteUrl(@NonNull String baseUrl, @NonNull String relativePath) {
@@ -72,7 +114,7 @@ public class NetworkUtils {
         }
 
         // maybe relativePath is already absolute
-        if (relativePath.startsWith(SCHEME_HTTP) || relativePath.startsWith(SCHEME_HTTPS)) {
+        if (relativePath.startsWith("http://") || relativePath.startsWith("https://")) {
             return relativePath;
         }
 
@@ -87,49 +129,10 @@ public class NetworkUtils {
         }
     }
 
-    public static Observable<String> checkGhostBlog(@NonNull String blogUrl) {
-        String ghostApiEndpointThatMustExist = makeAbsoluteUrl(blogUrl, "/ghost/");
-        return checkUrl(ghostApiEndpointThatMustExist)
-                .flatMap(response -> {
-                    // the request may have been redirected, most commonly from HTTP => HTTPS
-                    // so pick up the eventual URL of the blog and use that
-                    // (even if the user manually entered HTTP - it's certainly a mistake)
-                    URL urlObj = response.request().url();
-                    String eventualBlogUrl = urlObj.getProtocol() + "://" + urlObj.getHost();
-                    if (urlObj.getPort() >= 0) {
-                        eventualBlogUrl = eventualBlogUrl + ":" + urlObj.getPort();
-                    }
-                    return Observable.just(eventualBlogUrl);
-                });
-    }
-
-    public static Observable<com.squareup.okhttp.Response> checkUrl(@NonNull String url) {
-        OkHttpClient client = new OkHttpClient();
-        client.setConnectTimeout(10, TimeUnit.SECONDS);
-        client.setReadTimeout(3, TimeUnit.SECONDS);
-        Request request = new Request.Builder()
-                .url(url)
-                .head()     // make a HEAD request because we only want the response code
-                .build();
-        return networkCall(client.newCall(request))
-                .subscribeOn(Schedulers.io())
-                .observeOn(AndroidSchedulers.mainThread())
-                // FIXME remove this when we move to Retrofit2 / OkHttp3, see https://github.com/square/okhttp/issues/1592
-                // prevents a NetworkOnMainThreadException due to an OkHttp2 bug
-                .unsubscribeOn(Schedulers.io());
-    }
-
-    public static Observable<com.squareup.okhttp.Response> networkCall(@NonNull Call call) {
-        return Observable.create(subscriber -> {
-            // cancel the request when there are no subscribers
-            subscriber.add(Subscriptions.create(call::cancel));
-            try {
-                subscriber.onNext(call.execute());
-                subscriber.onCompleted();
-            } catch (IOException e) {
-                subscriber.onError(e);
-            }
-        });
+    public static Single<okhttp3.Response> networkCall(@NonNull Call call) {
+        return Single
+                .fromCallable(call::execute)
+                .doOnDispose(call::cancel);
     }
 
 }

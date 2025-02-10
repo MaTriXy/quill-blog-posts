@@ -44,22 +44,6 @@
 -dontwarn retrofit.**
 -keep class retrofit.** { *; }
 
-# Butterknife
--keepattributes *Annotation*
--keep class butterknife.** { *; }
--dontwarn butterknife.internal.**
--keep class **$$ViewBinder { *; }
--keepclasseswithmembernames class * {
-    @butterknife.* <fields>;
-}
--keepclasseswithmembernames class * {
-    @butterknife.* <methods>;
-}
--keepnames class * {
-    @butterknife.Bind *;
-}
-
-
 # GSON
 -keepattributes *Annotation*
 -keepattributes Signature
@@ -73,9 +57,6 @@
 
 # Realm
 # proguard.txt included in library
-
-# Retrolambda
--dontwarn java.lang.invoke.*
 
 # OkHttp
 -keepattributes Signature

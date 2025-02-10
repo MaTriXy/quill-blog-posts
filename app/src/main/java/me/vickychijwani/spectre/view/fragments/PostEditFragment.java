@@ -1,8 +1,12 @@
 package me.vickychijwani.spectre.view.fragments;
 
+import android.Manifest;
+import android.annotation.SuppressLint;
 import android.app.Activity;
 import android.app.ProgressDialog;
+import android.content.DialogInterface;
 import android.content.Intent;
+import android.net.Uri;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
@@ -21,7 +25,9 @@ import android.view.MenuInflater;
 import android.view.MenuItem;
 import android.view.View;
 import android.view.ViewGroup;
+import android.view.inputmethod.EditorInfo;
 import android.widget.EditText;
+import android.widget.TextView;
 import android.widget.Toast;
 
 import com.crashlytics.android.Crashlytics;
@@ -30,11 +36,15 @@ import com.squareup.otto.Subscribe;
 
 import java.io.IOException;
 
-import butterknife.Bind;
-import butterknife.ButterKnife;
+import butterknife.BindView;
+import io.reactivex.Observable;
+import io.reactivex.android.schedulers.AndroidSchedulers;
+import io.reactivex.disposables.Disposable;
+import io.reactivex.schedulers.Schedulers;
 import io.realm.RealmList;
 import me.vickychijwani.spectre.R;
 import me.vickychijwani.spectre.analytics.AnalyticsService;
+import me.vickychijwani.spectre.error.FileUploadFailedException;
 import me.vickychijwani.spectre.event.FileUploadErrorEvent;
 import me.vickychijwani.spectre.event.FileUploadEvent;
 import me.vickychijwani.spectre.event.FileUploadedEvent;
@@ -44,6 +54,9 @@ import me.vickychijwani.spectre.event.SavePostEvent;
 import me.vickychijwani.spectre.model.entity.PendingAction;
 import me.vickychijwani.spectre.model.entity.Post;
 import me.vickychijwani.spectre.model.entity.Tag;
+import me.vickychijwani.spectre.network.ApiFailure;
+import me.vickychijwani.spectre.util.functions.Action1;
+import me.vickychijwani.spectre.util.AppUtils;
 import me.vickychijwani.spectre.util.EditTextSelectionState;
 import me.vickychijwani.spectre.util.EditTextUtils;
 import me.vickychijwani.spectre.util.KeyboardUtils;
@@ -52,18 +65,17 @@ import me.vickychijwani.spectre.view.BundleKeys;
 import me.vickychijwani.spectre.view.FormatOptionClickListener;
 import me.vickychijwani.spectre.view.Observables;
 import me.vickychijwani.spectre.view.PostViewActivity;
-import rx.Observable;
-import rx.Subscription;
-import rx.android.schedulers.AndroidSchedulers;
-import rx.functions.Action1;
-import rx.functions.Actions;
-import rx.schedulers.Schedulers;
-import rx.subscriptions.Subscriptions;
+import permissions.dispatcher.NeedsPermission;
+import permissions.dispatcher.OnNeverAskAgain;
+import permissions.dispatcher.OnPermissionDenied;
+import permissions.dispatcher.RuntimePermissions;
 
+@RuntimePermissions
 public class PostEditFragment extends BaseFragment implements
         FormatOptionClickListener {
 
     private static final String TAG = "PostEditFragment";
+    private static final String EDITOR_CURSOR_POS = "key:private:editor_cursor_pos";
 
     private enum SaveScenario {
         UNKNOWN,
@@ -77,8 +89,8 @@ public class PostEditFragment extends BaseFragment implements
         EXPLICITLY_UPDATE_SCHEDULED_POST,
     }
 
-    @Bind(R.id.post_title_edit)             EditText mPostTitleEditView;
-    @Bind(R.id.post_markdown)               EditText mPostEditView;
+    @BindView(R.id.post_title_edit)             EditText mPostTitleEditView;
+    @BindView(R.id.post_markdown)               EditText mPostEditView;
 
     private PostViewActivity mActivity;
     private PostSettingsManager mPostSettingsManager;
@@ -86,6 +98,11 @@ public class PostEditFragment extends BaseFragment implements
     private Post mOriginalPost;     // copy of post since the time it was opened for editing
     private Post mLastSavedPost;    // copy of post since it was last saved
     private Post mPost;             // current copy of post in memory
+
+    // used in onPause/onResume
+    private int mPostEditViewCursorPos = -1;
+    // used only when changing tabs (no fragment lifecycle methods are triggered)
+    private EditTextSelectionState mFocusedEditTextSelectionState = null;
 
     private final Handler mHandler = new Handler(Looper.getMainLooper());
     private boolean mbDiscardChanges = false;
@@ -99,19 +116,17 @@ public class PostEditFragment extends BaseFragment implements
 
     // image insert / upload
     private static final int REQUEST_CODE_IMAGE_PICK = 1;
-    private Subscription mUploadSubscription = null;
+    private Disposable mUploadDisposable = null;
     private ProgressDialog mUploadProgress = null;
     private EditTextSelectionState mMarkdownEditSelectionState;
-    private boolean mbFileStorageEnabled = true;
     private Action1<String> mImageUploadDoneAction = null;
 
 
     @SuppressWarnings("unused")
-    public static PostEditFragment newInstance(@NonNull Post post, boolean fileStorageEnabled) {
+    public static PostEditFragment newInstance(@NonNull Post post) {
         PostEditFragment fragment = new PostEditFragment();
         Bundle args = new Bundle();
         args.putParcelable(BundleKeys.POST, post);
-        args.putBoolean(BundleKeys.FILE_STORAGE_ENABLED, fileStorageEnabled);
         fragment.setArguments(args);
         return fragment;
     }
@@ -121,7 +136,7 @@ public class PostEditFragment extends BaseFragment implements
     public View onCreateView(LayoutInflater inflater, ViewGroup container, Bundle savedInstanceState) {
         super.onCreateView(inflater, container, savedInstanceState);
         View view = inflater.inflate(R.layout.fragment_post_edit, container, false);
-        ButterKnife.bind(this, view);
+        bindView(view);
 
         mActivity = ((PostViewActivity) getActivity());
         mPostSettingsManager = mActivity;
@@ -130,8 +145,7 @@ public class PostEditFragment extends BaseFragment implements
         if (savedInstanceState != null) {
             args.putAll(savedInstanceState);        // overrides, for things that could've changed, and for new things like custom UI state
         }
-        mbFileStorageEnabled = args.getBoolean(BundleKeys.FILE_STORAGE_ENABLED,
-                mbFileStorageEnabled);
+        mPostEditViewCursorPos = args.getInt(EDITOR_CURSOR_POS, -1);
         if (args.containsKey(BundleKeys.POST_EDITED)) {
             mPostChangedInMemory = args.getBoolean(BundleKeys.POST_EDITED);
         }
@@ -172,20 +186,47 @@ public class PostEditFragment extends BaseFragment implements
         super.onSaveInstanceState(outState);
         outState.putParcelable(BundleKeys.POST, mPost);
         outState.putBoolean(BundleKeys.POST_EDITED, mPostChangedInMemory);
+        // save the editor cursor pos because setPost is called in onCreate/onResume
+        outState.putInt(EDITOR_CURSOR_POS, mPostEditView.getSelectionEnd());
+    }
+
+    public void saveSelectionState() {
+        final View focusedView = mActivity.getCurrentFocus();
+        if (focusedView != null && focusedView instanceof EditText) {
+            mFocusedEditTextSelectionState = new EditTextSelectionState((EditText) focusedView);
+        }
+    }
+
+    public void restoreSelectionState() {
+        if (mFocusedEditTextSelectionState != null) {
+            mFocusedEditTextSelectionState.focusAndRestoreSelectionState();
+            mFocusedEditTextSelectionState = null;
+        }
     }
 
     @Override
     public void onPause() {
+        super.onPause();
         // remove pending callbacks
         mHandler.removeCallbacks(mSaveTimeoutRunnable);
         // persist changes to disk, unless the user opted to discard those changes
-        saveAutomatically();
-        // must call super method AFTER saving, else we won't get the PostSavedEvent reply!
-        super.onPause();
-        // unsubscribe from observable
-        if (mUploadSubscription != null) {
-            mUploadSubscription.unsubscribe();
-            mUploadSubscription = null;
+        // workaround: do this ONLY if an image upload is NOT in progress - this is to avoid saving
+        // the post prematurely and generating a spurious conflict that cannot be dealt with cleanly
+        // because the post gets uploaded after this Activity goes away, putting it out-of-sync with
+        // the model
+        if (mImageUploadDoneAction == null) {
+            saveAutomatically();
+        } else {
+            // we still need to save to memory, else the post will revert to its original state!
+            saveToMemory();
+        }
+        // save misc editor state because setPost is called in onResume
+        mPostEditViewCursorPos = mPostEditView.getSelectionEnd();
+
+        // unsubscribe from observable and hide progress bar
+        if (mUploadDisposable != null && !mUploadDisposable.isDisposed()) {
+            mUploadDisposable.dispose();
+            mUploadDisposable = null;
             Toast.makeText(mActivity, R.string.image_upload_failed, Toast.LENGTH_SHORT).show();
         }
         if (mUploadProgress != null) {
@@ -203,11 +244,7 @@ public class PostEditFragment extends BaseFragment implements
 
     @Override
     public void onCreateOptionsMenu(Menu menu, MenuInflater inflater) {
-        if (mbFileStorageEnabled) {
-            inflater.inflate(R.menu.post_edit_file_storage_enabled, menu);
-        } else {
-            inflater.inflate(R.menu.post_edit_file_storage_disabled, menu);
-        }
+        inflater.inflate(R.menu.post_edit, menu);
     }
 
     @Override
@@ -288,11 +325,7 @@ public class PostEditFragment extends BaseFragment implements
     @Override
     public void onFormatImageClicked(View v) {
         PopupMenu popupMenu = new PopupMenu(mActivity, v);
-        if (mbFileStorageEnabled) {
-            popupMenu.inflate(R.menu.insert_image_file_storage_enabled);
-        } else {
-            popupMenu.inflate(R.menu.insert_image_file_storage_disabled);
-        }
+        popupMenu.inflate(R.menu.insert_image);
         // hide the "Remove This Image" option
         MenuItem removeImageItem = popupMenu.getMenu().findItem(R.id.action_image_remove);
         if (removeImageItem != null) {
@@ -307,21 +340,65 @@ public class PostEditFragment extends BaseFragment implements
             if (item.getItemId() == R.id.action_insert_image_url) {
                 onInsertImageUrlClicked(insertMarkdownAction);
             } else if (item.getItemId() == R.id.action_insert_image_upload) {
-                onInsertImageUploadClicked(insertMarkdownAction);
+                // the *WithCheck() method checks for runtime permissions and
+                // is generated by the PermissionsDispatcher library
+                PostEditFragmentPermissionsDispatcher.onInsertImageUploadClickedWithCheck(this,
+                        insertMarkdownAction);
             }
             return true;
         });
         popupMenu.show();
     }
 
+    @Override
+    public void onRequestPermissionsResult(int requestCode, @NonNull String[] permissions, @NonNull int[] grantResults) {
+        PostEditFragmentPermissionsDispatcher.onRequestPermissionsResult(this, requestCode, grantResults);
+    }
+
     public void onInsertImageUrlClicked(Action1<String> resultAction) {
-        Observables.getImageUrlDialog(mActivity).subscribe((imageUrl) -> {
+        // ok to pass null here: https://possiblemobile.com/2013/05/layout-inflation-as-intended/
+        @SuppressLint("InflateParams")
+        final View dialogView = mActivity.getLayoutInflater().inflate(R.layout.dialog_image_insert,
+                null, false);
+        final TextView imageUrlView = (TextView) dialogView.findViewById(R.id.image_url);
+
+        // hack for word wrap with "Done" IME action! see http://stackoverflow.com/a/13563946/504611
+        imageUrlView.setHorizontallyScrolling(false);
+        imageUrlView.setMaxLines(20);
+
+        Observable<String> imageUrlObservable = Observables.getDialog(emitter -> {
+            AlertDialog dialog = new AlertDialog.Builder(mActivity)
+                    .setTitle(mActivity.getString(R.string.insert_image))
+                    .setView(dialogView)
+                    .setCancelable(true)
+                    .setPositiveButton(R.string.insert, (d, which) -> {
+                        emitter.onNext(imageUrlView.getText().toString());
+                        emitter.onComplete();
+                    })
+                    .setNegativeButton(android.R.string.cancel, (d, which) -> {
+                        d.dismiss();
+                        emitter.onComplete();
+                    })
+                    .create();
+            imageUrlView.setOnEditorActionListener((view, actionId, event) -> {
+                if (actionId == EditorInfo.IME_ACTION_DONE) {
+                    dialog.getButton(DialogInterface.BUTTON_POSITIVE).performClick();
+                    return true;
+                }
+                return false;
+            });
+            return dialog;
+        });
+
+        imageUrlObservable.subscribe((imageUrl) -> {
             resultAction.call(imageUrl);
             mMarkdownEditSelectionState = null;
             KeyboardUtils.focusAndShowKeyboard(mActivity, mPostEditView);
         });
     }
 
+    @SuppressLint("InlinedApi") // suppressed because PermissionsDispatcher handles API levels for us
+    @NeedsPermission(Manifest.permission.READ_EXTERNAL_STORAGE)
     public void onInsertImageUploadClicked(Action1<String> uploadDoneAction) {
         mImageUploadDoneAction = uploadDoneAction;
         Intent imagePickIntent = new Intent(Intent.ACTION_GET_CONTENT);
@@ -329,7 +406,22 @@ public class PostEditFragment extends BaseFragment implements
         imagePickIntent.setType("image/*");
         if (imagePickIntent.resolveActivity(mActivity.getPackageManager()) != null) {
             startActivityForResult(imagePickIntent, REQUEST_CODE_IMAGE_PICK);
+        } else {
+            Toast.makeText(mActivity, R.string.intent_no_apps, Toast.LENGTH_SHORT).show();
         }
+    }
+
+    @SuppressLint("InlinedApi") // suppressed because PermissionsDispatcher handles API levels for us
+    @OnPermissionDenied(Manifest.permission.READ_EXTERNAL_STORAGE)
+    void onStoragePermissionDenied() {
+        Toast.makeText(mActivity, R.string.image_upload_failed, Toast.LENGTH_SHORT).show();
+    }
+
+    @SuppressLint("InlinedApi") // suppressed because PermissionsDispatcher handles API levels for us
+    @OnNeverAskAgain(Manifest.permission.READ_EXTERNAL_STORAGE)
+    void onStoragePermissionPermanentlyDenied() {
+        Toast.makeText(mActivity, R.string.enable_permission_tip, Toast.LENGTH_LONG).show();
+        AppUtils.showSystemAppSettingsActivity(mActivity);
     }
 
     @Override
@@ -337,51 +429,69 @@ public class PostEditFragment extends BaseFragment implements
         if (result == null || result.getData() == null || resultCode != Activity.RESULT_OK) {
             return;
         }
+        if (requestCode == REQUEST_CODE_IMAGE_PICK) {
+            uploadImage(result.getData());
+        }
+    }
 
-        if (mUploadSubscription != null) {
-            mUploadSubscription.unsubscribe();
-            mUploadSubscription = null;
+    private void uploadImage(@NonNull Uri uri) {
+        if (mUploadDisposable != null && !mUploadDisposable.isDisposed()) {
+            mUploadDisposable.dispose();
+            mUploadDisposable = null;
         }
 
         mUploadProgress = ProgressDialog.show(mActivity, null,
                 mActivity.getString(R.string.uploading), true, false);
 
-        mUploadSubscription = Observables
-                .getBitmapFromUri(mActivity.getContentResolver(), result.getData())
-                .map(Observables.Funcs.copyBitmapToJpegFile())
+        mUploadDisposable = Observables
+                .getFileUploadMetadataFromUri(mActivity.getContentResolver(), uri)
                 .subscribeOn(Schedulers.io())
                 .observeOn(AndroidSchedulers.mainThread())
-                .subscribe((imagePath) -> {
-                    getBus().post(new FileUploadEvent(imagePath, "image/jpeg"));
+                .subscribe((pair) -> {
+                    getBus().post(new FileUploadEvent(pair.first, pair.second));
                 }, (error) -> {
-                    Toast.makeText(mActivity, R.string.image_upload_failed, Toast.LENGTH_SHORT).show();
-                    mUploadProgress.dismiss();
-                    mUploadProgress = null;
-                }, () -> {      // onComplete
-                    //noinspection Convert2MethodRef
-                    mUploadSubscription = null;
+                    onFileUploadErrorEvent(new FileUploadErrorEvent(new ApiFailure(error)));
+                }, () -> {
+                    mUploadDisposable = null;
                 });
     }
 
     @Subscribe
     public void onFileUploadedEvent(FileUploadedEvent event) {
-        mUploadProgress.dismiss();
-        mUploadProgress = null;
-        if (mImageUploadDoneAction == null) {
-            Crashlytics.log(Log.ERROR, TAG, "No 'image upload done action' found!");
-            return;
+        // the activity could have been destroyed and re-created
+        if (mUploadProgress != null) {
+            mUploadProgress.dismiss();
+            mUploadProgress = null;
         }
-        mImageUploadDoneAction.call(event.relativeUrl);
-        mImageUploadDoneAction = null;
+        // the activity could have been destroyed and re-created
+        if (mImageUploadDoneAction != null) {
+            mImageUploadDoneAction.call(event.relativeUrl);
+            mImageUploadDoneAction = null;
+        }
         mMarkdownEditSelectionState = null;
         KeyboardUtils.focusAndShowKeyboard(mActivity, mPostEditView);
     }
 
     @Subscribe
     public void onFileUploadErrorEvent(FileUploadErrorEvent event) {
+        if (event.apiFailure.error != null) {
+            Crashlytics.logException(new FileUploadFailedException(event.apiFailure.error));
+        } else if (event.apiFailure.response != null) {
+            try {
+                String responseStr = event.apiFailure.response.errorBody().string();
+                Crashlytics.logException(new FileUploadFailedException(responseStr));
+            } catch (IOException e) {
+                Log.e(TAG, Log.getStackTraceString(e));
+            }
+        }
         Toast.makeText(mActivity, R.string.image_upload_failed, Toast.LENGTH_SHORT).show();
-        mUploadProgress.dismiss();
-        mUploadProgress = null;
+        // the activity could have been destroyed and re-created
+        if (mUploadProgress != null) {
+            mUploadProgress.dismiss();
+            mUploadProgress = null;
+        }
+        mImageUploadDoneAction = null;
+        mMarkdownEditSelectionState = null;
     }
 
     private boolean saveToServerExplicitly() {
@@ -429,7 +539,7 @@ public class PostEditFragment extends BaseFragment implements
     }
 
     public boolean saveAutomaticallyWithImage(@NonNull String imageUrl) {
-        mPost.setImage(imageUrl);
+        mPost.setFeatureImage(imageUrl);
         return saveAutomatically();
     }
 
@@ -440,7 +550,9 @@ public class PostEditFragment extends BaseFragment implements
         mPost.setMarkdown(mPostEditView.getText().toString());
         mPost.setHtml(null);   // omit stale HTML from request body
         mPost.setTags(mPostSettingsManager.getTags());
+        mPost.setCustomExcerpt(mPostSettingsManager.getCustomExcerpt());
         mPost.setFeatured(mPostSettingsManager.isFeatured());
+        mPost.setPage(mPostSettingsManager.isPage());
         if (newStatus != null) {
             mPost.setStatus(newStatus);
         }
@@ -469,7 +581,8 @@ public class PostEditFragment extends BaseFragment implements
             onPublishUnpublishClicked();
         } else {
             // case (2): saving edits to a scheduled or published post
-            onSaveClicked().subscribe(Actions.empty());
+            // empty subscribe() because we don't care about the Observable in this case
+            onSaveClicked().subscribe();
         }
     }
 
@@ -482,23 +595,20 @@ public class PostEditFragment extends BaseFragment implements
         if (mPost.isDraft()) {
             return Observable.just(saveToServerExplicitly());
         }
-        return Observable.create((subscriber) -> {
+        return Observables.getDialog(emitter -> {
             // confirm save for scheduled and published posts
-            final AlertDialog alertDialog = new AlertDialog.Builder(mActivity)
+            return new AlertDialog.Builder(mActivity)
                     .setMessage(getString(R.string.alert_save_msg))
                     .setPositiveButton(R.string.alert_save_yes, (dialog, which) -> {
-                        subscriber.onNext(saveToServerExplicitly());
-                        subscriber.onCompleted();
+                        emitter.onNext(saveToServerExplicitly());
+                        emitter.onComplete();
                     })
                     .setNegativeButton(R.string.alert_save_no, (dialog, which) -> {
                         dialog.dismiss();
-                        subscriber.onNext(false);
-                        subscriber.onCompleted();
+                        emitter.onNext(false);
+                        emitter.onComplete();
                     })
                     .create();
-            // dismiss the dialog automatically if this subscriber unsubscribes
-            subscriber.add(Subscriptions.create(alertDialog::dismiss));
-            alertDialog.show();
         });
     }
 
@@ -522,13 +632,9 @@ public class PostEditFragment extends BaseFragment implements
                     // slug with the title as long as it's being published now (even if it was
                     // published and then unpublished earlier).
                     if (Post.PUBLISHED.equals(finalTargetStatus)) {
-                        try {
-                            // update the title in memory first, from the latest value in UI
-                            mPost.setTitle(mPostTitleEditView.getText().toString());
-                            mPost.setSlug(new Slugify().slugify(mPost.getTitle()));
-                        } catch (IOException e) {
-                            Crashlytics.logException(e);
-                        }
+                        // update the title in memory first, from the latest value in UI
+                        mPost.setTitle(mPostTitleEditView.getText().toString());
+                        mPost.setSlug(new Slugify().slugify(mPost.getTitle()));
                     }
                     saveToServerExplicitly(finalTargetStatus);
                 })
@@ -552,7 +658,7 @@ public class PostEditFragment extends BaseFragment implements
     public void onPostSavedEvent(PostSavedEvent event) {
         // FIXME the assumption is that SavePostEvent and PostSavedEvent are synchronously sent one
         // FIXME after the other, which breaks the EventBus' "don't assume synchronous" contract
-        if (mPost.getUuid().equals(event.post.getUuid())) {
+        if (mPost.getId().equals(event.post.getId())) {
             mLastSavedPost = new Post(mPost);
         }
 
@@ -637,6 +743,11 @@ public class PostEditFragment extends BaseFragment implements
         }
         mPostTitleEditView.setText(post.getTitle());
         mPostEditView.setText(post.getMarkdown());
+        if (mPostEditViewCursorPos >= 0
+                // cursor pos is == length, when it's at the very end
+                && mPostEditViewCursorPos <= mPostEditView.getText().length()) {
+            mPostEditView.setSelection(mPostEditViewCursorPos);
+        }
     }
 
     private class PostTextWatcher implements TextWatcher {
@@ -658,7 +769,7 @@ public class PostEditFragment extends BaseFragment implements
         public void afterTextChanged(Editable s) {}
     }
 
-    class PostSettingsChangedListener implements PostViewActivity.PostSettingsChangedListener {
+    private class PostSettingsChangedListener implements PostViewActivity.PostSettingsChangedListener {
         @Override
         public void onPostSettingsChanged() {
             mPostChangedInMemory = true;
@@ -670,7 +781,9 @@ public class PostEditFragment extends BaseFragment implements
         void setOnPostSettingsChangedListener(PostViewActivity.PostSettingsChangedListener listener);
         void removeOnPostSettingsChangedListener();
         RealmList<Tag> getTags();
+        String getCustomExcerpt();
         boolean isFeatured();
+        boolean isPage();
     }
 
 }

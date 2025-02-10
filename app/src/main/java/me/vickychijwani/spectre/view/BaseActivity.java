@@ -4,12 +4,12 @@ import android.app.Activity;
 import android.content.Context;
 import android.content.Intent;
 import android.net.Uri;
-import android.os.Build;
 import android.os.Bundle;
 import android.support.customtabs.CustomTabsIntent;
 import android.support.v4.app.Fragment;
 import android.support.v4.app.NavUtils;
 import android.support.v4.content.ContextCompat;
+import android.support.v7.app.AppCompatActivity;
 import android.util.Log;
 import android.view.MenuItem;
 import android.widget.Toast;
@@ -18,22 +18,26 @@ import com.crashlytics.android.Crashlytics;
 import com.squareup.otto.Bus;
 import com.squareup.otto.Subscribe;
 import com.squareup.picasso.Picasso;
-import com.trello.rxlifecycle.components.support.RxAppCompatActivity;
 import com.tsengvn.typekit.TypekitContextWrapper;
 
 import java.util.List;
 
 import butterknife.ButterKnife;
+import io.reactivex.disposables.CompositeDisposable;
+import io.reactivex.disposables.Disposable;
 import me.vickychijwani.spectre.R;
 import me.vickychijwani.spectre.SpectreApplication;
 import me.vickychijwani.spectre.event.BusProvider;
-import me.vickychijwani.spectre.event.PasswordChangedEvent;
+import me.vickychijwani.spectre.event.CredentialsExpiredEvent;
 import me.vickychijwani.spectre.view.fragments.BaseFragment;
 
-public abstract class BaseActivity extends RxAppCompatActivity {
+@SuppressWarnings("WeakerAccess")
+public abstract class BaseActivity extends AppCompatActivity {
 
     private static final String TAG = "BaseActivity";
-    private PasswordChangedEventHandler mPasswordChangedEventHandler = null;
+    private CredentialsExpiredEventHandler mCredentialsExpiredEventHandler = null;
+
+    private final CompositeDisposable mOnPauseDisposables = new CompositeDisposable();
 
     protected Bus getBus() {
         return BusProvider.getBus();
@@ -43,11 +47,14 @@ public abstract class BaseActivity extends RxAppCompatActivity {
         return SpectreApplication.getInstance().getPicasso();
     }
 
+    protected void disposeOnPause(Disposable d) {
+        mOnPauseDisposables.add(d);
+    }
+
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         Crashlytics.log(Log.DEBUG, TAG, this.getClass().getSimpleName() + "#onCreate()");
-        getBus().register(this);
     }
 
     protected void setLayout(int layoutResID) {
@@ -59,9 +66,10 @@ public abstract class BaseActivity extends RxAppCompatActivity {
     protected void onStart() {
         super.onStart();
         Crashlytics.log(Log.DEBUG, TAG, this.getClass().getSimpleName() + "#onStart()");
+        getBus().register(this);
         if (! (this instanceof LoginActivity)) {
-            mPasswordChangedEventHandler = new PasswordChangedEventHandler(this);
-            getBus().register(mPasswordChangedEventHandler);
+            mCredentialsExpiredEventHandler = new CredentialsExpiredEventHandler(this);
+            getBus().register(mCredentialsExpiredEventHandler);
         }
     }
 
@@ -75,23 +83,24 @@ public abstract class BaseActivity extends RxAppCompatActivity {
     protected void onPause() {
         super.onPause();
         Crashlytics.log(Log.DEBUG, TAG, this.getClass().getSimpleName() + "#onPause()");
+        mOnPauseDisposables.dispose();
     }
 
     @Override
     protected void onStop() {
         super.onStop();
         Crashlytics.log(Log.DEBUG, TAG, this.getClass().getSimpleName() + "#onStop()");
-        if (mPasswordChangedEventHandler != null) {
-            getBus().unregister(mPasswordChangedEventHandler);
-            mPasswordChangedEventHandler = null;
+        if (mCredentialsExpiredEventHandler != null) {
+            getBus().unregister(mCredentialsExpiredEventHandler);
+            mCredentialsExpiredEventHandler = null;
         }
+        getBus().unregister(this);
     }
 
     @Override
     protected void onDestroy() {
         super.onDestroy();
         Crashlytics.log(Log.DEBUG, TAG, this.getClass().getSimpleName() + "#onDestroy()");
-        getBus().unregister(this);
     }
 
     @Override
@@ -120,6 +129,7 @@ public abstract class BaseActivity extends RxAppCompatActivity {
     @Override
     public void onBackPressed() {
         Crashlytics.log(Log.DEBUG, TAG, this.getClass().getSimpleName() + "#onBackPressed()");
+        // give fragments a chance to handle back press
         List<Fragment> fragments = getSupportFragmentManager().getFragments();
         if (fragments != null) {
             for (Fragment f : fragments) {
@@ -133,6 +143,11 @@ public abstract class BaseActivity extends RxAppCompatActivity {
                 }
             }
         }
+        // pop back stack if any
+        if (getSupportFragmentManager().popBackStackImmediate()) {
+            return;
+        }
+        // finally, delegate to superclass
         super.onBackPressed();
     }
 
@@ -142,40 +157,40 @@ public abstract class BaseActivity extends RxAppCompatActivity {
     }
 
     protected void startBrowserActivity(String url) {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.JELLY_BEAN) {
-            CustomTabsIntent.Builder builder = new CustomTabsIntent.Builder();
-            builder.setToolbarColor(ContextCompat.getColor(this, R.color.primary));
-            builder.addDefaultShareMenuItem();
-            CustomTabsIntent customTabsIntent = builder.build();
-            customTabsIntent.launchUrl(this, Uri.parse(url));
-        } else {
-            Intent browserIntent = new Intent(this, BrowserActivity.class);
-            browserIntent.putExtra(BundleKeys.URL, url);
-            startActivity(browserIntent);
-        }
+        CustomTabsIntent.Builder builder = new CustomTabsIntent.Builder();
+        builder.setToolbarColor(ContextCompat.getColor(this, R.color.primary));
+        builder.addDefaultShareMenuItem();
+        CustomTabsIntent customTabsIntent = builder.build();
+        customTabsIntent.launchUrl(this, Uri.parse(url));
     }
 
     protected void openUrl(String url) {
         startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse(url)));
     }
 
+    protected void credentialsExpired() {
+        new CredentialsExpiredEventHandler(this)
+                .onCredentialsExpiredEvent(new CredentialsExpiredEvent());
+    }
+
 
     // the event handler cannot be added to BaseActivity directly because Otto doesn't look at base
     // classes when looking for subscribers, hence this little helper class
-    private static class PasswordChangedEventHandler {
+    private static class CredentialsExpiredEventHandler {
         private final Activity mActivity;
 
-        public PasswordChangedEventHandler(Activity activity) {
+        public CredentialsExpiredEventHandler(Activity activity) {
             mActivity = activity;
         }
 
         @Subscribe
-        public void onPasswordChangedEvent(PasswordChangedEvent event) {
+        public void onCredentialsExpiredEvent(CredentialsExpiredEvent event) {
             Intent intent = new Intent(mActivity, LoginActivity.class);
             // destroy all activities in this task stack
             intent.setFlags(Intent.FLAG_ACTIVITY_CLEAR_TASK | Intent.FLAG_ACTIVITY_NEW_TASK);
             mActivity.startActivity(intent);
-            Toast.makeText(mActivity, mActivity.getString(R.string.password_changed), Toast.LENGTH_LONG).show();
+            Toast.makeText(mActivity, mActivity.getString(R.string.credentials_expired),
+                    Toast.LENGTH_LONG).show();
             mActivity.finish();
         }
     }

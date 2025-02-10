@@ -8,7 +8,7 @@ import android.text.method.LinkMovementMethod;
 import android.view.View;
 import android.widget.TextView;
 
-import butterknife.Bind;
+import butterknife.BindView;
 import butterknife.OnClick;
 import me.vickychijwani.spectre.R;
 import me.vickychijwani.spectre.util.AppUtils;
@@ -16,15 +16,15 @@ import me.vickychijwani.spectre.util.AppUtils;
 public class AboutActivity extends BaseActivity {
 
     public static final String URL_GITHUB_CONTRIBUTING = "https://github.com/vickychijwani/quill/blob/master/CONTRIBUTING.md#reporting-bugs";
-    public static final String URL_TRANSLATE = "https://hosted.weblate.org/engage/quill/en/";
+    public static final String URL_TRANSLATE = "https://hosted.weblate.org/engage/ghost/en/";
     public static final String URL_MY_WEBSITE = "http://vickychijwani.me";
     public static final String URL_TWITTER_PROFILE = "https://twitter.com/vickychijwani";
     public static final String URL_GITHUB_REPO = "https://github.com/vickychijwani/quill";
     public static final String URL_GITHUB_PROFILE = "https://github.com/vickychijwani";
 
-    @Bind(R.id.toolbar) Toolbar mToolbar;
-    @Bind(R.id.about_version) TextView mVersionView;
-    @Bind(R.id.about_icon_credits) TextView mIconCreditsView;
+    @BindView(R.id.toolbar) Toolbar mToolbar;
+    @BindView(R.id.about_version) TextView mVersionView;
+    @BindView(R.id.about_icon_credits) TextView mIconCreditsView;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -90,7 +90,7 @@ public class AboutActivity extends BaseActivity {
 
     @OnClick(R.id.about_email_developer)
     public void onEmailDeveloperClicked(View v) {
-        AppUtils.emailDeveloper(this);
+        AppUtils.emailFeedbackToDeveloper(this);
     }
 
 }

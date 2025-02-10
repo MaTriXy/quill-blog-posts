@@ -7,6 +7,7 @@ import android.support.annotation.DrawableRes;
 import android.support.annotation.NonNull;
 import android.support.annotation.Nullable;
 import android.support.v4.content.ContextCompat;
+import android.text.TextUtils;
 import android.util.Log;
 
 import com.crashlytics.android.Crashlytics;
@@ -18,11 +19,11 @@ import java.util.List;
 import java.util.TimeZone;
 
 import me.vickychijwani.spectre.R;
-import me.vickychijwani.spectre.SpectreApplication;
+import me.vickychijwani.spectre.account.AccountManager;
+import me.vickychijwani.spectre.model.entity.BlogMetadata;
 import me.vickychijwani.spectre.model.entity.PendingAction;
 import me.vickychijwani.spectre.model.entity.Post;
 import me.vickychijwani.spectre.model.entity.Tag;
-import me.vickychijwani.spectre.pref.UserPrefs;
 
 public class PostUtils {
 
@@ -78,17 +79,12 @@ public class PostUtils {
             return -lhs.getCreatedAt().compareTo(rhs.getCreatedAt());
         }
 
-        // this is just paranoia
-        // higher id above, because it was likely created later
-        return -lhs.getId() + rhs.getId();
+        // if all else fails
+        return -1;
     };
 
     @SuppressWarnings({"RedundantIfStatement", "OverlyComplexMethod"})
     public static boolean isDirty(@NonNull Post original, @NonNull Post current) {
-        boolean bothImagesNull = (original.getImage() == null && current.getImage() == null);
-        boolean oneImageNull = (original.getImage() != null && current.getImage() == null)
-                || (original.getImage() == null && current.getImage() != null);
-
         if (! original.getTitle().equals(current.getTitle()))
             return true;
         if (! original.getStatus().equals(current.getStatus()))
@@ -97,23 +93,30 @@ public class PostUtils {
             return true;
         if (! original.getMarkdown().equals(current.getMarkdown()))
             return true;
-        if (!bothImagesNull && (oneImageNull || !original.getImage().equals(current.getImage())))
+        if (! TextUtils.equals(original.getFeatureImage(), current.getFeatureImage()))
             return true;
         if (original.getTags().size() != current.getTags().size())
             return true;
         if (! tagListsMatch(original.getTags(), current.getTags()))
             return true;
+        if (! TextUtils.equals(original.getCustomExcerpt(), current.getCustomExcerpt())
+                // default from API is null, and in the UI is empty string "", but they are the same
+                // so at least one of them must be non-empty for the post to be considered dirty
+                && (!TextUtils.isEmpty(original.getCustomExcerpt()) || !TextUtils.isEmpty(current.getCustomExcerpt())))
+            return true;
         if (original.isFeatured() != current.isFeatured())
+            return true;
+        if (original.isPage() != current.isPage())
             return true;
         return false;
     }
 
     public static String getPostUrl(@Nullable Post post) {
         if (post == null) throw new IllegalArgumentException("post cannot be null!");
-        UserPrefs prefs = UserPrefs.getInstance(SpectreApplication.getInstance());
-        String blogUrl = prefs.getString(UserPrefs.Key.BLOG_URL);
+        BlogMetadata blog = AccountManager.getActiveBlog();
+        String blogUrl = blog.getBlogUrl();
         if (post.isPublished()) {
-            String permalinkFormat = prefs.getString(UserPrefs.Key.PERMALINK_FORMAT);
+            String permalinkFormat = blog.getPermalinkFormat();
             Calendar calendar = Calendar.getInstance(TimeZone.getTimeZone("UTC"));
             Date publishedAt = post.getPublishedAt();
             // FIXME temp if check for Crashlytics issue #110

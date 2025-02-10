@@ -1,14 +1,14 @@
 package me.vickychijwani.spectre.event;
 
-import retrofit.RetrofitError;
+import me.vickychijwani.spectre.network.ApiFailure;
 
 @SuppressWarnings({"WeakerAccess", "unused"})
 public class FileUploadErrorEvent {
 
-    public final RetrofitError error;
+    public final ApiFailure apiFailure;
 
-    public FileUploadErrorEvent(RetrofitError error) {
-        this.error = error;
+    public FileUploadErrorEvent(ApiFailure apiFailure) {
+        this.apiFailure = apiFailure;
     }
 
 }
